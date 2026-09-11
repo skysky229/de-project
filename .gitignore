@@ -1,0 +1,32 @@
+# Environment / secrets
+.env
+
+# Airflow
+logs/
+plugins/
+airflow.db
+airflow-webserver.pid
+
+# Spark
+spark_jobs/**/__pycache__/
+*.pyc
+derby.log
+metastore_db/
+
+# Python
+__pycache__/
+*.egg-info/
+.venv/
+venv/
+
+# Docker
+docker/**/*.pid
+
+# OS
+.DS_Store
+
+# Webapp (populated later)
+webapp/node_modules/
+webapp/.next/
+webapp/dist/
+webapp/__pycache__/

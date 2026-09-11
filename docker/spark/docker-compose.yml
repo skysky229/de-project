@@ -1,0 +1,28 @@
+networks:
+  default:
+    name: de-platform
+
+services:
+  spark-master:
+    build: .
+    image: de-platform/spark:local
+    environment:
+      SPARK_MODE: master
+    ports:
+      - "7077:7077"
+      - "8081:8080" # Spark master UI (8080 is taken by Airflow webserver)
+    volumes:
+      - ../../spark_jobs:/opt/spark_jobs
+
+  spark-worker:
+    build: .
+    image: de-platform/spark:local
+    environment:
+      SPARK_MODE: worker
+      SPARK_MASTER_URL: spark://spark-master:7077
+      SPARK_WORKER_CORES: 2
+      SPARK_WORKER_MEMORY: 2G
+    depends_on:
+      - spark-master
+    volumes:
+      - ../../spark_jobs:/opt/spark_jobs

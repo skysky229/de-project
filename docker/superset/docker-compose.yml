@@ -1,0 +1,44 @@
+networks:
+  default:
+    name: de-platform
+
+x-superset-common: &superset-common
+  build: .
+  image: de-platform/superset:local
+  environment: &superset-common-env
+    SUPERSET_SECRET_KEY: ${SUPERSET_SECRET_KEY}
+    SUPERSET_LOAD_EXAMPLES: "no"
+  volumes:
+    - superset_home:/app/superset_home
+
+services:
+  superset-init:
+    <<: *superset-common
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        superset db upgrade
+        superset fab create-admin \
+          --username "${SUPERSET_ADMIN_USER}" \
+          --password "${SUPERSET_ADMIN_PASSWORD}" \
+          --firstname "${SUPERSET_ADMIN_FIRSTNAME}" \
+          --lastname "${SUPERSET_ADMIN_LASTNAME}" \
+          --email "${SUPERSET_ADMIN_EMAIL}" || true
+        superset init
+        # Pre-wires the ClickHouse connection so it shows up ready-made in
+        # Data -> Databases, instead of requiring manual setup through the UI.
+        superset set-database-uri \
+          --database_name "ClickHouse" \
+          --uri "clickhousedb://${CLICKHOUSE_USER}:${CLICKHOUSE_PASSWORD}@clickhouse:8123/${CLICKHOUSE_DB}"
+
+  superset:
+    <<: *superset-common
+    ports:
+      - "8088:8088"
+    depends_on:
+      superset-init:
+        condition: service_completed_successfully
+
+volumes:
+  superset_home:
