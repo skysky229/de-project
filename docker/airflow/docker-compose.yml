@@ -9,6 +9,7 @@ x-airflow-common: &airflow-common
     AIRFLOW__CORE__EXECUTOR: LocalExecutor
     AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres/${POSTGRES_DB}
     AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW__CORE__FERNET_KEY}
+    AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW__WEBSERVER__SECRET_KEY}
     AIRFLOW__CORE__LOAD_EXAMPLES: "false"
     AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "true"
     AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
@@ -17,6 +18,11 @@ x-airflow-common: &airflow-common
     CLICKHOUSE_USER: ${CLICKHOUSE_USER}
     CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
     CLICKHOUSE_DB: ${CLICKHOUSE_DB}
+    DWH_CH_URL: ${DWH_CH_URL}
+    DWH_CH_USER: ${DWH_CH_USER}
+    DWH_CH_PASSWORD: ${DWH_CH_PASSWORD}
+    DWH_SOURCE_DB: ${DWH_SOURCE_DB}
+    DWH_TARGET_DB: ${DWH_TARGET_DB}
   volumes:
     - ../../dags:/opt/airflow/dags
     - ../../spark_jobs:/opt/airflow/spark_jobs
