@@ -54,13 +54,30 @@ docker compose --env-file .env -f docker/spark/docker-compose.yml up -d
 │       ├── requirements.txt               # clickhouse-connect
 │       └── docker-compose.yml             # superset-init + superset (standalone-runnable; own SQLite metadata DB)
 ├── dags/                                # Airflow DAG definitions, mounted into the airflow containers
-│   └── example_minio_spark_pipeline.py   # smoke test: Airflow -> Spark -> MinIO -> Spark -> ClickHouse
+│   ├── example_minio_spark_pipeline.py   # smoke test: Airflow -> Spark -> MinIO -> Spark -> ClickHouse
+│   └── logistics_dwh_daily.py            # logistics DWH: one Spark task per dwh table
+├── dwh/
+│   └── migrations/
+│       └── 001_add_sys_create_date.sql   # adds sys_create_date to the 14 raw tables in ClickHouse `default`
+├── docs/
+│   ├── dw_design_review.md               # DWH table design (your design + review notes)
+│   ├── spark_etl_plan.md                 # how the Spark ETL reads, transforms, writes, optimizes
+│   └── how_to_add_a_table.md             # step-by-step guide + template for a new dim/fact/mart job
+├── dataset/                             # original CSVs + schema notes (source of the raw ClickHouse tables)
 ├── spark_jobs/                          # PySpark application code, mounted into airflow + spark containers
 │   ├── word_count.py                    # task 1: raw text -> MinIO -> word-count parquet -> MinIO
 │   └── minio_to_clickhouse.py            # task 2: reads that parquet from MinIO, loads into ClickHouse via JDBC
 ├── upload_jobs/                          # PySpark application code, mounted into airflow + spark containers
 │   ├── s3_upload.py                    # task 1: Raw csv files upload -> MinIO
 │
+│   ├── minio_to_clickhouse.py            # task 2: reads that parquet from MinIO, loads into ClickHouse via JDBC
+│   └── dwh/                              # logistics DWH jobs: one file = one target table = one task
+│       ├── common.py                      # shared helpers, shipped with --py-files: JDBC read/write,
+│       │                                  #   window args, dedup, surrogate keys, Unknown member
+│       ├── dim/                           # TaskGroup `dim` (runs first)
+│       │   └── dim_driver.py              #   default.drivers -> dwh.dim_driver
+│       ├── fact/                          # TaskGroup `fact` (after dim) - none yet
+│       └── mart/                          # TaskGroup `mart` (after fact) - none yet
 └── webapp/                              # NOT STARTED — see webapp/README.md
 ```
 
@@ -145,3 +162,28 @@ Run the job to process uploading .csv files to MinIO
 python3 upload_jobs/s3_upload.py
 ```
 * Please set up the file directory in the .env file
+## Logistics DWH pipeline
+
+`dags/logistics_dwh_daily.py` loads the star schema from the raw tables on the
+ClickHouse Cloud service set in `.env` (`DWH_CH_*`):
+raw `DWH_SOURCE_DB` (`default`) -> Spark -> `DWH_TARGET_DB` (`dwh`).
+Design: `docs/dw_design_review.md`. Plan: `docs/spark_etl_plan.md`.
+**Adding a table: `docs/how_to_add_a_table.md`.**
+
+- One task per target table, each running its own file under
+  `spark_jobs/dwh/{dim,fact,mart}/`, grouped into TaskGroups `dim -> fact -> mart`.
+- Spark does every transformation; ClickHouse only filters on read and stores.
+- Each run reads raw rows created on the run date
+  (`toDate(sys_create_date) = ds`; raw tables are treated as append-only).
+- Targets are `ReplacingMergeTree(src_sys_create_date)` tables ordered by the
+  business key (`driver_id`, `trip_id`, ...). Jobs only append; the newest
+  *source* version wins, so re-runs and backfills are safe. `etl_loaded_date`
+  records when the row was written. Query with `FINAL` for exact results.
+- Backfill: trigger the DAG with conf
+  `{"start_date": "2000-01-01", "end_date": "2024-12-31"}`.
+
+Needs the Spark cluster up (`docker compose up -d spark-master spark-worker`).
+
+Connecting a SQL client (DBeaver etc.) to the ClickHouse Cloud service: use
+`jdbc:clickhouse://<host>:8443/default?ssl=true&compress=0` (HTTPS port 8443;
+`compress=0` is required for older JDBC drivers such as 0.5/0.6).
