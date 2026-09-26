@@ -1,6 +1,6 @@
-from minio import MinIO
+from minio import Minio
 from minio.error import S3Error
-from dotenv import loadenv
+from dotenv import load_dotenv
 
 import os
 
@@ -10,11 +10,11 @@ import os
 # MINIO_ENDPOINT=http://minio:9000
 # MINIO_BUCKET_RAW=raw
 # MINIO_BUCKET_PROCESSED=processed
-loadenv()
+load_dotenv()
 
 ROOT_USER = os.getenv("MINIO_ROOT_USER")
 ROOT_PASSWORD = os.getenv("MINIO_ROOT_PASSWORD")
-ROOT_ENDPOINT = os.getenv("MINIO_ENDPOINT")
+ROOT_ENDPOINT = os.getenv("MINIO_ENDPOINT").replace('minio', 'localhost')
 BUCKET_RAW = os.getenv("MINIO_BUCKET_RAW")
 BUCKET_PROCESSED = os.getenv("MINIO_BUCKET_PROCESSED")
 
@@ -23,13 +23,20 @@ DATA_DIR = '/Users/No/MasterProjects/DataEngineer/data_etl/data'
 def file_resolver(dir: str = ""):
     if not dir:
         print("Failed to resolve directory")
-        return []
-    return [file_path for file_path in os.listdir(dir) if file_path.endswith(".csv")]
+        return []   
+    return [os.path.join(dir,file_path) for file_path in os.listdir(dir) if file_path.endswith(".csv")]
     
 def get_file_name(path: str = ""):
     file_parts = path.split("/")
     file_name = file_parts[-1].replace(".csv","")
     return file_name
+
+def exclude_url_prefix(url: str = ""):
+    if not url:
+        print("No url exist !!")
+        return
+    cleaned_path = url.replace("http://", "").replace("https://", "")
+    return cleaned_path
 
 class S3Uploader(object):
     def __init__(self, access_key: str = "",  secret_key: str = "", endpoint: str = "",  bucket_raw: str = "", bucket_processed: str = ""):
@@ -40,14 +47,14 @@ class S3Uploader(object):
         self.bucket_processed = bucket_processed
 
     def get_client(self): 
-        return MinIO(
+        return Minio(
             self.endpoint,
             self.access_key,
             self.secret_key,
             secure=False,
         )
     
-    def init_buckets(self, client: MinIO, buckets: list):
+    def init_buckets(self, client: Minio, buckets: list):
         try:
             for bucket in buckets:
                 if bucket and not client.bucket_exists(bucket):
@@ -62,13 +69,16 @@ class S3Uploader(object):
     
     def file_to_bucket(self, file_path: str, bucket_type: str):
         object_name = f"/logistics/" + get_file_name(file_path)
-        object_stat = self.get_client().stat_object(bucket_type, file_path)
-
-        if object_stat:
-            print("Object exist")
-            return
         try:
-            result = self.client.fput_object(
+            object_stat = self.get_client().stat_object(bucket_type, object_name)
+            if object_stat:
+                print("Object exist")
+            return
+        except Exception as exc:
+            print("Object has not existed:", exc)
+       
+        try:
+            result = self.get_client().fput_object(
                     bucket_name=bucket_type,
                     object_name=object_name,
                     file_path=file_path,
@@ -103,8 +113,10 @@ class S3Uploader(object):
             return
         
 if __name__ == "__main__":
-    uploader = S3Uploader(ROOT_USER, ROOT_PASSWORD, ROOT_ENDPOINT, BUCKET_RAW, BUCKET_PROCESSED)
+    
+    uploader = S3Uploader(ROOT_USER, ROOT_PASSWORD, exclude_url_prefix(ROOT_ENDPOINT)   , BUCKET_RAW, BUCKET_PROCESSED)
     client = uploader.get_client()
     uploader.init_buckets(client, [BUCKET_RAW, BUCKET_PROCESSED])
     file_list = file_resolver(DATA_DIR)
     uploader.put_bucket_raw(file_list)
+    

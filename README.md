@@ -58,6 +58,9 @@ docker compose --env-file .env -f docker/spark/docker-compose.yml up -d
 ├── spark_jobs/                          # PySpark application code, mounted into airflow + spark containers
 │   ├── word_count.py                    # task 1: raw text -> MinIO -> word-count parquet -> MinIO
 │   └── minio_to_clickhouse.py            # task 2: reads that parquet from MinIO, loads into ClickHouse via JDBC
+├── upload_jobs/                          # PySpark application code, mounted into airflow + spark containers
+│   ├── s3_upload.py                    # task 1: Raw csv files upload -> MinIO
+│
 └── webapp/                              # NOT STARTED — see webapp/README.md
 ```
 
@@ -135,3 +138,10 @@ Check the result with:
 ```bash
 docker compose exec clickhouse clickhouse-client --query "SELECT * FROM default.word_counts"
 ```
+
+# Data processing jobs
+Run the job to process uploading .csv files to MinIO
+```bash
+python3 upload_jobs/s3_upload.py
+```
+* Please set up the file directory in the .env file
