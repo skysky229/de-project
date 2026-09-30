@@ -66,6 +66,10 @@ docker compose --env-file .env -f docker/spark/docker-compose.yml up -d
 ├── dataset/                             # original CSVs + schema notes (source of the raw ClickHouse tables)
 ├── spark_jobs/                          # PySpark application code, mounted into airflow + spark containers
 │   ├── word_count.py                    # task 1: raw text -> MinIO -> word-count parquet -> MinIO
+│   └── minio_to_clickhouse.py            # task 2: reads that parquet from MinIO, loads into ClickHouse via JDBC
+├── upload_jobs/                          # PySpark application code, mounted into airflow + spark containers
+│   ├── s3_upload.py                    # task 1: Raw csv files upload -> MinIO
+│
 │   ├── minio_to_clickhouse.py            # task 2: reads that parquet from MinIO, loads into ClickHouse via JDBC
 │   └── dwh/                              # logistics DWH jobs: one file = one target table = one task
 │       ├── common.py                      # shared helpers, shipped with --py-files: JDBC read/write,
@@ -152,6 +156,12 @@ Check the result with:
 docker compose exec clickhouse clickhouse-client --query "SELECT * FROM default.word_counts"
 ```
 
+# Data processing jobs
+Run the job to process uploading .csv files to MinIO
+```bash
+python3 upload_jobs/s3_upload.py
+```
+* Please set up the file directory in the .env file
 ## Logistics DWH pipeline
 
 `dags/logistics_dwh_daily.py` loads the star schema from the raw tables on the
