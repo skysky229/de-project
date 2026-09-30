@@ -3,7 +3,7 @@
 Every table in `dwh` is built by **one Spark job file**, run by **one Airflow task**.
 To add a table you write one file, register it in the DAG, and test it.
 
-Working reference: `spark_jobs/dwh/dim/dim_driver.py`. Copy it.
+Working reference: `spark_jobs/dwh/dims/dim_driver.py`. Copy it.
 
 ---
 
@@ -11,7 +11,7 @@ Working reference: `spark_jobs/dwh/dim/dim_driver.py`. Copy it.
 
 | Rule | What it means in code |
 |---|---|
-| One table, one file | `spark_jobs/dwh/<layer>/<table>.py`, file name = table name (e.g. `dim/dim_truck.py`) |
+| One table, one file | `spark_jobs/dwh/<layer>/<table>.py`, file name = table name (e.g. `dims/dim_truck.py`) |
 | Spark transforms, ClickHouse stores | SQL sent to ClickHouse is only `SELECT <columns> FROM ... WHERE ...` plus DDL. Joins, dedup, derived columns and aggregation happen in Spark. |
 | Read only the run's window | Raw tables are append-only; read them with `read_created_between()` (`WHERE toDate(sys_create_date) BETWEEN start AND end`). |
 | Append only, merge on business key | Target is a `ReplacingMergeTree(src_sys_create_date)` with `ORDER BY <business key>`. The job only appends; ClickHouse keeps the newest source version per key. Re-runs are safe. |
@@ -107,7 +107,7 @@ Then add what your layer needs (sections 4–6).
 In `dags/logistics_dwh_daily.py`, add the table name to the list for its layer:
 
 ```python
-DIM_TABLES = ["dim_driver", "dim_truck"]     # file: spark_jobs/dwh/dim/dim_truck.py
+DIM_TABLES = ["dim_driver", "dim_truck"]     # file: spark_jobs/dwh/dims/dim_truck.py
 FACT_TABLES = ["fact_trip"]
 MART_TABLES = []
 ```

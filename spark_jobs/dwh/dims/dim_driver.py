@@ -77,7 +77,6 @@ def unknown_member(spark):
                CAST('1970-01-01 00:00:00' AS TIMESTAMP) AS src_sys_create_date
     """)
 
-
 def main():
     start, end = parse_window()
     spark = get_spark(f"{TABLE}_{start}_{end}")
@@ -94,7 +93,6 @@ def main():
         write_append(dim, TABLE)
         print(f"[{TABLE}] window {start}..{end}: read {raw_count} raw rows, wrote {dim.count()} rows")
     spark.stop()
-
 
 if __name__ == "__main__":
     main()

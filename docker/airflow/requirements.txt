@@ -1,6 +1,7 @@
 apache-airflow-providers-apache-spark
 apache-airflow-providers-amazon
 boto3
+minio
 # Airflow 2.9.3's constraints file already pins pyspark==3.5.1 - this line just
 # makes that explicit. docker/spark/Dockerfile is pinned to match it exactly.
 pyspark==3.5.1

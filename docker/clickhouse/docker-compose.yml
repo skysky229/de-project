@@ -1,6 +1,6 @@
 networks:
   default:
-    name: de-platform
+    name: de-project
 
 services:
   clickhouse:
