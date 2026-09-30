@@ -32,6 +32,8 @@ Working reference: `spark_jobs/dwh/dim/dim_driver.py`. Copy it.
 | `read_query(spark, sql)` | Read anything else with a plain SELECT, e.g. a `dwh` table with `FINAL` (marts) |
 | `latest_per_key(df, keys)` | Keep the newest version per business key within the batch (by `sys_create_date`) |
 | `surrogate_key(col)` | Stable Int64 key, `-1` for empty ids |
+| `date_key(col)` | yyyyMMdd Int key from a date/timestamp column |
+| `money(col_name, scale=2)` | Float64 amount → Decimal, rounded first (0.29 stays 0.29) |
 | `empty_to_null(col)` | Turn `''` into NULL |
 | `with_audit(df)` | Add `etl_loaded_date` |
 | `write_append(df, table)` | Batched JDBC append into `dwh.<table>` |

@@ -139,11 +139,12 @@ def read_query(spark: SparkSession, sql: str) -> DataFrame:
     return spark.read.format("jdbc").options(**_JDBC_OPTIONS).option("query", sql).load()
 
 
-def write_append(df: DataFrame, table: str) -> None:
+def write_append(df: DataFrame, table: str, database: str = TARGET_DB) -> None:
+    """Batched JDBC append into <database>.<table> (the dwh by default; streaming ingest passes SOURCE_DB)."""
     (
         df.write.format("jdbc")
         .options(**_JDBC_OPTIONS)
-        .option("dbtable", f"{TARGET_DB}.{table}")
+        .option("dbtable", f"{database}.{table}")
         .option("batchsize", 50000)
         # ClickHouse has no transactions; stop Spark from calling setTransactionIsolation/commit
         .option("isolationLevel", "NONE")
@@ -165,6 +166,16 @@ def surrogate_key(natural_id: Column) -> Column:
     return F.when(natural_id.isNull() | (F.trim(natural_id) == ""), F.lit(UNKNOWN_KEY)).otherwise(
         F.xxhash64(natural_id)
     )
+
+
+def date_key(col) -> Column:
+    """yyyyMMdd as Int, e.g. 2024-03-15 -> 20240315 (date or timestamp input)."""
+    return F.date_format(col, "yyyyMMdd").cast("int")
+
+
+def money(col_name: str, scale: int = 2, precision: int = 18) -> Column:
+    """Float64 amount -> Decimal. Round first so 0.29 (stored as 0.28999..) stays 0.29."""
+    return F.round(F.col(col_name), scale).cast(f"decimal({precision},{scale})")
 
 
 def empty_to_null(col: Column) -> Column:

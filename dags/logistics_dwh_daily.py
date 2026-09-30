@@ -28,7 +28,9 @@ JOBS_DIR = "/opt/airflow/spark_jobs/dwh"
 
 # one entry per target table = one job file = one task
 DIM_TABLES = ["dim_driver"]
-FACT_TABLES: list = []
+FACT_TABLES = [
+    "fact_trip", "fact_delivery_event", "fact_fuel_purchase", "fact_maintenance", "fact_safety_incident",
+]
 MART_TABLES: list = []
 
 DWH_ENV = {

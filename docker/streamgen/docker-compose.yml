@@ -1,0 +1,19 @@
+networks:
+  default:
+    name: de-platform
+
+services:
+  # Simulated live events -> Kafka (see generator.py). Needs `kafka` up and the
+  # raw ClickHouse tables reachable (it reads existing dimension ids once at start).
+  streamgen:
+    build: .
+    image: de-platform/streamgen:local
+    environment:
+      KAFKA_BOOTSTRAP: kafka:9092
+      TRIPS_PER_SECOND: ${STREAMGEN_TRIPS_PER_SECOND:-1}
+      MAINTENANCE_PER_MINUTE: ${STREAMGEN_MAINTENANCE_PER_MINUTE:-3}
+      DWH_CH_URL: ${DWH_CH_URL}
+      DWH_CH_USER: ${DWH_CH_USER}
+      DWH_CH_PASSWORD: ${DWH_CH_PASSWORD}
+      DWH_SOURCE_DB: ${DWH_SOURCE_DB}
+    restart: unless-stopped
