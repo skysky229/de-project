@@ -1,16 +1,11 @@
 # Convenience entrypoint: brings up all stacks together.
 # Each stack also runs standalone, e.g.:
 #   docker compose --env-file .env -f docker/airflow/docker-compose.yml up -d
-# (--env-file .env is required: without it, Compose looks for .env inside
-# docker/airflow/ instead of the repo root, silently blanking out every
-# ${VAR}. Do NOT use --project-directory to "fix" this instead - it also
-# shifts where build/volume relative paths resolve from, breaking them.)
-# They share the "de-platform" network (declared in each file) so cross-file
-# service-name resolution (e.g. Airflow -> spark-master, Spark -> minio) works
-# whether you start them together or separately.
 include:
   - docker/minio/docker-compose.yml
   - docker/clickhouse/docker-compose.yml
   - docker/airflow/docker-compose.yml
   - docker/spark/docker-compose.yml
   - docker/superset/docker-compose.yml
+  - docker/kafka/docker-compose.yml
+  - docker/streamgen/docker-compose.yml
