@@ -10,32 +10,33 @@ plus independent raw.maintenance_records.
 Values are random within realistic ranges and ids carry an 'S' (streamed) marker
 plus the generator's start time, e.g. TRIPS1790500000-000001, so they never collide
 with historic rows. Foreign keys pick existing drivers/trucks/trailers/customers/
-routes/facilities (read once from ClickHouse), so facts join to the dimensions.
+routes/facilities (read once at start from the CSVs in MinIO, raw/csv/), so facts
+join to the dimensions.
 
 Message = one raw-table row as JSON (column names = raw table columns),
 key = the row's business key. sys_create_date is NOT in the message: the
 ingest job stamps it with the Kafka record time.
 
 Env: KAFKA_BOOTSTRAP, TRIPS_PER_SECOND, MAINTENANCE_PER_MINUTE,
-     DWH_CH_URL / DWH_CH_USER / DWH_CH_PASSWORD / DWH_SOURCE_DB
+     MINIO_ENDPOINT / MINIO_ROOT_USER / MINIO_ROOT_PASSWORD / MINIO_BUCKET_RAW / MINIO_CSV_PREFIX
 """
-import base64
+import csv
 import heapq
+import io
 import json
 import os
 import random
 import signal
 import time
-import urllib.request
 from datetime import datetime, timedelta, timezone
 
 from confluent_kafka import Producer
 from confluent_kafka.admin import AdminClient, NewTopic
+from minio import Minio
 
 BOOTSTRAP = os.environ.get("KAFKA_BOOTSTRAP", "kafka:9092")
 TRIPS_PER_SECOND = float(os.environ.get("TRIPS_PER_SECOND", "1"))
 MAINTENANCE_PER_MINUTE = float(os.environ.get("MAINTENANCE_PER_MINUTE", "3"))
-SOURCE_DB = os.environ.get("DWH_SOURCE_DB", "default")
 
 TOPICS = ["raw.loads", "raw.trips", "raw.delivery_events", "raw.fuel_purchases",
           "raw.maintenance_records", "raw.safety_incidents"]
@@ -60,26 +61,30 @@ def maybe_empty(value: str, p: float = 0.02) -> str:
 
 # ------------------------------------------------------------- reference data
 
-def ch_rows(sql: str) -> list:
-    token = base64.b64encode(
-        f"{os.environ.get('DWH_CH_USER', 'default')}:{os.environ['DWH_CH_PASSWORD']}".encode()).decode()
-    req = urllib.request.Request(os.environ["DWH_CH_URL"].rstrip("/") + "/",
-                                 data=f"{sql} FORMAT JSONEachRow".encode(),
-                                 headers={"Authorization": f"Basic {token}"})
-    with urllib.request.urlopen(req, timeout=60) as resp:
-        return [json.loads(line) for line in resp.read().decode().splitlines() if line]
+def csv_rows(table: str) -> list:
+    """Rows of s3://<bucket>/<prefix>/<table>.csv (uploaded by the logistics_bootstrap DAG)."""
+    endpoint = os.environ.get("MINIO_ENDPOINT", "http://minio:9000")
+    client = Minio(endpoint.removeprefix("http://").removeprefix("https://"),
+                   access_key=os.environ["MINIO_ROOT_USER"], secret_key=os.environ["MINIO_ROOT_PASSWORD"],
+                   secure=endpoint.startswith("https://"))
+    bucket, prefix = os.environ.get("MINIO_BUCKET_RAW", "raw"), os.environ.get("MINIO_CSV_PREFIX", "csv")
+    resp = client.get_object(bucket, f"{prefix}/{table}.csv")
+    try:
+        return list(csv.DictReader(io.StringIO(resp.read().decode())))
+    finally:
+        resp.close()
+        resp.release_conn()
 
 
 def load_reference() -> dict:
-    ids = lambda table, col: [r[col] for r in ch_rows(f"SELECT DISTINCT {col} FROM {SOURCE_DB}.{table}")]
+    ids = lambda table, col: sorted({r[col] for r in csv_rows(table)})
     return {
         "drivers": ids("drivers", "driver_id"),
         "trucks": ids("trucks", "truck_id"),
         "trailers": ids("trailers", "trailer_id"),
         "customers": ids("customers", "customer_id"),
-        "routes": ch_rows(f"SELECT route_id, destination_city, destination_state, typical_distance_miles, "
-                          f"base_rate_per_mile, fuel_surcharge_rate FROM {SOURCE_DB}.routes"),
-        "facilities": ch_rows(f"SELECT facility_id, city, state FROM {SOURCE_DB}.facilities"),
+        "routes": csv_rows("routes"),         # route_id, destination_city/state, distance, rates
+        "facilities": csv_rows("facilities"),  # facility_id, city, state
     }
 
 

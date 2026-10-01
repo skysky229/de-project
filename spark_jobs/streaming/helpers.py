@@ -1,19 +1,22 @@
 """ClickHouse + transform helpers for the streaming jobs.
 
-Deliberately a copy of the parts of spark_jobs/dwh/common.py that streaming needs, so
+Deliberately a copy of the parts of spark_jobs/batch/common.py that streaming needs, so
 the streaming code has no dependency on the batch code (owned separately). Keep the
 two in sync by hand: the views dwh.v_<fact> union batch and streaming rows, so keys
 (xxhash64), money rounding and the version column must behave identically.
 
 Config (env vars): DWH_CH_URL (https://<host>:8443), DWH_CH_USER, DWH_CH_PASSWORD,
-DWH_SOURCE_DB (raw tables, default: default), DWH_TARGET_DB (dwh tables, default: dwh).
+DWH_TARGET_DB (dwh tables, default: dwh), DWH_RAW_HISTORY_ROOT (bootstrap raw history in
+MinIO, default: s3a://raw/history; read for lookups such as routes). ClickHouse is the
+warehouse only: the old raw tables in `default` are not read.
 """
+
 import os
 
 from pyspark.sql import Column, DataFrame, SparkSession, Window
 from pyspark.sql import functions as F
 
-SOURCE_DB = os.environ.get("DWH_SOURCE_DB", "default")
+RAW_HISTORY_ROOT = os.environ.get("DWH_RAW_HISTORY_ROOT", "s3a://raw/history")
 TARGET_DB = os.environ.get("DWH_TARGET_DB", "dwh")
 UNKNOWN_KEY = -1
 
@@ -27,21 +30,23 @@ _JDBC_OPTIONS = {
 
 # ---------------------------------------------------------------------- setup
 
+
 def get_spark(app_name: str) -> SparkSession:
     return (
         SparkSession.builder.appName(app_name)
         # source timestamps carry no zone; keep day boundaries in UTC
-        .config("spark.sql.session.timeZone", "UTC")
-        .getOrCreate()
+        .config("spark.sql.session.timeZone", "UTC").getOrCreate()
     )
 
 
 # ----------------------------------------------------------------- ClickHouse
 
+
 def execute(spark: SparkSession, sql: str) -> None:
     """Run one DDL statement on ClickHouse from the driver (no data returned)."""
     conn = spark.sparkContext._jvm.java.sql.DriverManager.getConnection(
-        _JDBC_OPTIONS["url"], _JDBC_OPTIONS["user"], _JDBC_OPTIONS["password"])
+        _JDBC_OPTIONS["url"], _JDBC_OPTIONS["user"], _JDBC_OPTIONS["password"]
+    )
     try:
         conn.createStatement().execute(sql)
     finally:
@@ -53,9 +58,10 @@ def ensure_table(spark: SparkSession, ddl: str) -> None:
     execute(spark, ddl.format(db=TARGET_DB))
 
 
-def read_query(spark: SparkSession, sql: str) -> DataFrame:
-    """Read the result of a plain SELECT (projection + WHERE only; keep transforms in Spark)."""
-    return spark.read.format("jdbc").options(**_JDBC_OPTIONS).option("query", sql).load()
+def read_raw_all(spark: SparkSession, table: str, columns: list) -> DataFrame:
+    """All raw history rows of a (small, not streamed) table from MinIO, e.g. routes for lookups.
+    Same name/signature as the batch helper, so copied batch code runs unchanged."""
+    return spark.read.parquet(f"{RAW_HISTORY_ROOT}/{table}").select(*columns)
 
 
 def write_append(df: DataFrame, table: str, database: str = TARGET_DB) -> None:
@@ -73,6 +79,7 @@ def write_append(df: DataFrame, table: str, database: str = TARGET_DB) -> None:
 
 
 # ------------------------------------------------------------------ transform
+
 
 def latest_per_key(df: DataFrame, keys: list, version: str = "sys_create_date") -> DataFrame:
     """Keep one row per business key: the latest version in this micro-batch."""

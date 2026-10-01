@@ -4,7 +4,7 @@ networks:
 
 services:
   # Simulated live events -> Kafka (see generator.py). Needs `kafka` up and the
-  # raw ClickHouse tables reachable (it reads existing dimension ids once at start).
+  # bootstrap CSVs in MinIO raw/csv/ (it reads existing dimension ids once at start).
   streamgen:
     build: .
     image: de-platform/streamgen:local
@@ -12,8 +12,10 @@ services:
       KAFKA_BOOTSTRAP: kafka:9092
       TRIPS_PER_SECOND: ${STREAMGEN_TRIPS_PER_SECOND:-1}
       MAINTENANCE_PER_MINUTE: ${STREAMGEN_MAINTENANCE_PER_MINUTE:-3}
-      DWH_CH_URL: ${DWH_CH_URL}
-      DWH_CH_USER: ${DWH_CH_USER}
-      DWH_CH_PASSWORD: ${DWH_CH_PASSWORD}
-      DWH_SOURCE_DB: ${DWH_SOURCE_DB}
+      # reference ids (drivers, trucks, routes, ...) come from the CSVs in MinIO raw/csv/
+      MINIO_ENDPOINT: ${MINIO_ENDPOINT}
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      MINIO_BUCKET_RAW: ${MINIO_BUCKET_RAW}
+      MINIO_CSV_PREFIX: csv
     restart: unless-stopped

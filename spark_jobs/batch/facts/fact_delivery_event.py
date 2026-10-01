@@ -1,21 +1,22 @@
-"""fact_delivery_event (streaming): Kafka raw.delivery_events -> dwh.fact_delivery_event_streaming  (merge on event_id)
-
-Self-contained on purpose: DDL and transform() are copied from the batch job
-(spark_jobs/batch/facts/fact_delivery_event.py) instead of imported, so streaming doesn't depend on
-the batch code. Only the table name differs (fact_delivery_event_streaming, 72 h TTL). The view
-dwh.v_fact_delivery_event unions both tables, so keep the columns identical to the batch job.
-"""
+"""Load pickup and delivery events at one row per event_id."""
 
 from pyspark.sql import functions as F
 
-from streaming.helpers import latest_per_key, surrogate_key
-from streaming.stream_common import start_fact
+from common import (
+    ensure_table,
+    get_spark,
+    latest_per_key,
+    parse_window,
+    read_created_between,
+    surrogate_key,
+    with_audit,
+    write_append,
+)
 
-NAME = "fact_delivery_event_streaming"  # also the checkpoint folder name
-TABLE = "fact_delivery_event_streaming"
+TABLE = "fact_delivery_event"
 
 DDL = """
-    CREATE TABLE IF NOT EXISTS {db}.fact_delivery_event_streaming
+    CREATE TABLE IF NOT EXISTS {db}.fact_delivery_event
     (
         event_key Int64,
         event_id String,
@@ -38,9 +39,20 @@ DDL = """
     ) 
     ENGINE = ReplacingMergeTree(src_sys_create_date)
     ORDER BY event_id
-TTL src_sys_create_date + INTERVAL 72 HOUR
-SETTINGS merge_with_ttl_timeout = 3600
     """
+
+SOURCE_COLUMNS = [
+    "event_id",
+    "load_id",
+    "trip_id",
+    "event_type",
+    "facility_id",
+    "scheduled_datetime",
+    "actual_datetime",
+    "detention_minutes",
+    "on_time_flag",
+    "sys_create_date",
+]
 
 
 def transform(raw):
@@ -71,5 +83,22 @@ def transform(raw):
     )
 
 
-def start(spark):
-    return start_fact(spark, NAME, "delivery_events", TABLE, DDL, transform)
+def main():
+    start, end = parse_window()
+    spark = get_spark(f"{TABLE}_{start}_{end}")
+    ensure_table(spark, DDL)
+
+    raw = read_created_between(spark, "delivery_events", SOURCE_COLUMNS, start, end).cache()
+
+    if raw.count():
+        out = with_audit(transform(raw)).cache()
+        write_append(out, TABLE)
+        print(f"[{TABLE}] wrote {out.count()} rows")
+    else:
+        print(f"[{TABLE}] window {start}..{end}: read 0 raw rows, nothing to write")
+
+    spark.stop()
+
+
+if __name__ == "__main__":
+    main()

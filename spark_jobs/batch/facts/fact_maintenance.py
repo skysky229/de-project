@@ -1,21 +1,22 @@
-"""fact_maintenance (streaming): Kafka raw.maintenance_records -> dwh.fact_maintenance_streaming  (merge on maintenance_id)
-
-Self-contained on purpose: DDL and transform() are copied from the batch job
-(spark_jobs/batch/facts/fact_maintenance.py) instead of imported, so streaming doesn't depend on
-the batch code. Only the table name differs (fact_maintenance_streaming, 72 h TTL). The view
-dwh.v_fact_maintenance unions both tables, so keep the columns identical to the batch job.
-"""
+"""Load truck maintenance transactions."""
 
 from pyspark.sql import functions as F
 
-from streaming.helpers import latest_per_key, surrogate_key
-from streaming.stream_common import start_fact
+from common import (
+    ensure_table,
+    get_spark,
+    latest_per_key,
+    parse_window,
+    read_created_between,
+    surrogate_key,
+    with_audit,
+    write_append,
+)
 
-NAME = "fact_maintenance_streaming"  # also the checkpoint folder name
-TABLE = "fact_maintenance_streaming"
+TABLE = "fact_maintenance"
 
 DDL = """
-CREATE TABLE IF NOT EXISTS {db}.fact_maintenance_streaming
+CREATE TABLE IF NOT EXISTS {db}.fact_maintenance
 (
     maintenance_key Int64,
     maintenance_id String,
@@ -35,9 +36,22 @@ CREATE TABLE IF NOT EXISTS {db}.fact_maintenance_streaming
 )
 ENGINE = ReplacingMergeTree(src_sys_create_date)
 ORDER BY maintenance_id
-TTL src_sys_create_date + INTERVAL 72 HOUR
-SETTINGS merge_with_ttl_timeout = 3600
 """
+
+SOURCE_COLUMNS = [
+    "maintenance_id",
+    "truck_id",
+    "maintenance_date",
+    "maintenance_type",
+    "odometer_reading",
+    "labor_hours",
+    "labor_cost",
+    "parts_cost",
+    "total_cost",
+    "facility_location",
+    "downtime_hours",
+    "sys_create_date",
+]
 
 
 def transform(raw):
@@ -59,5 +73,22 @@ def transform(raw):
     )
 
 
-def start(spark):
-    return start_fact(spark, NAME, "maintenance_records", TABLE, DDL, transform)
+def main():
+    start, end = parse_window()
+    spark = get_spark(f"{TABLE}_{start}_{end}")
+    ensure_table(spark, DDL)
+
+    raw = read_created_between(spark, "maintenance_records", SOURCE_COLUMNS, start, end).cache()
+
+    if raw.count():
+        out = with_audit(transform(raw)).cache()
+        write_append(out, TABLE)
+        print(f"[{TABLE}] wrote {out.count()} rows")
+    else:
+        print(f"[{TABLE}] window {start}..{end}: read 0 raw rows, nothing to write")
+
+    spark.stop()
+
+
+if __name__ == "__main__":
+    main()

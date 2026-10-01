@@ -2,7 +2,11 @@
 
 The script is usable locally and as an Airflow task. Configure it with
 ``DATA_DIR``, ``MINIO_ENDPOINT``, ``MINIO_ROOT_USER``,
-``MINIO_ROOT_PASSWORD``, and ``MINIO_BUCKET_RAW``.
+``MINIO_ROOT_PASSWORD``, ``MINIO_BUCKET_RAW`` and ``MINIO_CSV_PREFIX`` (default ``csv``).
+
+Files land in s3://<bucket>/<prefix>/<name>.csv (raw/csv/ by default), kept apart from
+the streaming parquet in raw/logistics/. spark_jobs/batch/bootstrap/build_raw_history.py
+turns them into the partitioned history in raw/history/.
 """
 import os
 from pathlib import Path
@@ -29,6 +33,7 @@ def upload_csvs(data_dir: str | None = None) -> int:
         secure=secure,
     )
     bucket = os.environ.get("MINIO_BUCKET_RAW", "raw")
+    prefix = os.environ.get("MINIO_CSV_PREFIX", "csv")
     if not client.bucket_exists(bucket):
         client.make_bucket(bucket)
 
@@ -37,8 +42,8 @@ def upload_csvs(data_dir: str | None = None) -> int:
         raise FileNotFoundError(f"No CSV files found in {source_dir}")
     for path in files:
         # Replaces an existing object, so an Airflow retry is safe.
-        client.fput_object(bucket, f"logistics/{path.name}", str(path))
-        print(f"Uploaded {path.name} to s3://{bucket}/logistics/{path.name}")
+        client.fput_object(bucket, f"{prefix}/{path.name}", str(path))
+        print(f"Uploaded {path.name} to s3://{bucket}/{prefix}/{path.name}")
     return len(files)
 
 

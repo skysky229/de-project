@@ -1,21 +1,22 @@
-"""fact_fuel_purchase (streaming): Kafka raw.fuel_purchases -> dwh.fact_fuel_purchase_streaming  (merge on fuel_purchase_id)
-
-Self-contained on purpose: DDL and transform() are copied from the batch job
-(spark_jobs/batch/facts/fact_fuel_purchase.py) instead of imported, so streaming doesn't depend on
-the batch code. Only the table name differs (fact_fuel_purchase_streaming, 72 h TTL). The view
-dwh.v_fact_fuel_purchase unions both tables, so keep the columns identical to the batch job.
-"""
+"""Load fuel-purchase transactions at one row per fuel_purchase_id."""
 
 from pyspark.sql import functions as F
 
-from streaming.helpers import latest_per_key, surrogate_key
-from streaming.stream_common import start_fact
+from common import (
+    ensure_table,
+    get_spark,
+    latest_per_key,
+    parse_window,
+    read_created_between,
+    surrogate_key,
+    with_audit,
+    write_append,
+)
 
-NAME = "fact_fuel_purchase_streaming"  # also the checkpoint folder name
-TABLE = "fact_fuel_purchase_streaming"
+TABLE = "fact_fuel_purchase"
 
 DDL = """
-    CREATE TABLE IF NOT EXISTS {db}.fact_fuel_purchase_streaming 
+    CREATE TABLE IF NOT EXISTS {db}.fact_fuel_purchase 
     (
         fuel_purchase_key Int64,
         fuel_purchase_id String,
@@ -32,9 +33,21 @@ DDL = """
     )
     ENGINE = ReplacingMergeTree(src_sys_create_date)
     ORDER BY fuel_purchase_id
-TTL src_sys_create_date + INTERVAL 72 HOUR
-SETTINGS merge_with_ttl_timeout = 3600
     """
+
+SOURCE_COLUMNS = [
+    "fuel_purchase_id",
+    "trip_id",
+    "truck_id",
+    "driver_id",
+    "purchase_date",
+    "location_city",
+    "location_state",
+    "gallons",
+    "price_per_gallon",
+    "total_cost",
+    "sys_create_date",
+]
 
 
 def transform(raw):
@@ -53,5 +66,22 @@ def transform(raw):
     )
 
 
-def start(spark):
-    return start_fact(spark, NAME, "fuel_purchases", TABLE, DDL, transform)
+def main():
+    start, end = parse_window()
+    spark = get_spark(f"{TABLE}_{start}_{end}")
+    ensure_table(spark, DDL)
+
+    raw = read_created_between(spark, "fuel_purchases", SOURCE_COLUMNS, start, end).cache()
+
+    if raw.count():
+        out = with_audit(transform(raw)).cache()
+        write_append(out, TABLE)
+        print(f"[{TABLE}] wrote {out.count()} rows")
+    else:
+        print(f"[{TABLE}] window {start}..{end}: read 0 raw rows, nothing to write")
+
+    spark.stop()
+
+
+if __name__ == "__main__":
+    main()

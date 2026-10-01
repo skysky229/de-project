@@ -21,12 +21,10 @@ x-airflow-common: &airflow-common
     DWH_CH_URL: ${DWH_CH_URL}
     DWH_CH_USER: ${DWH_CH_USER}
     DWH_CH_PASSWORD: ${DWH_CH_PASSWORD}
-    DWH_SOURCE_DB: ${DWH_SOURCE_DB}
     DWH_TARGET_DB: ${DWH_TARGET_DB}
   volumes:
     - ../../dags:/opt/airflow/dags
     - ../../spark_jobs:/opt/airflow/spark_jobs
-    - ../../upload_jobs:/opt/airflow/upload_jobs:ro
     - ../../dataset:/opt/airflow/dataset:ro
     - ../../logs:/opt/airflow/logs
   depends_on:

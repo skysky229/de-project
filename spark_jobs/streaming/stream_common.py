@@ -19,6 +19,7 @@ Env: KAFKA_BOOTSTRAP (default kafka:9092), STREAM_CHECKPOINT_ROOT
 (default s3a://processed/checkpoints/streaming), STREAM_RAW_ROOT (default
 s3a://raw/logistics), STREAM_TRIGGER (default "30 seconds").
 """
+
 import os
 
 from pyspark.sql import DataFrame, SparkSession
@@ -34,7 +35,7 @@ TRIGGER = os.environ.get("STREAM_TRIGGER", "30 seconds")
 
 
 def read_raw_topic(spark: SparkSession, table: str) -> DataFrame:
-    """Topic raw.<table> -> rows shaped like the raw ClickHouse table (incl. sys_create_date).
+    """Topic raw.<table> -> rows shaped like the raw table (same columns as raw/history/<table>, incl. sys_create_date).
 
     sys_create_date = the Kafka record timestamp: when the platform received the event.
     It's stable across replays (unlike now()), so a replayed micro-batch produces identical rows.
@@ -43,11 +44,13 @@ def read_raw_topic(spark: SparkSession, table: str) -> DataFrame:
         spark.readStream.format("kafka")
         .option("kafka.bootstrap.servers", KAFKA_BOOTSTRAP)
         .option("subscribe", f"raw.{table}")
-        .option("startingOffsets", "earliest")      # only used on the very first start
-        .option("failOnDataLoss", "false")          # topic retention may delete unread data
+        .option("startingOffsets", "earliest")  # only used on the very first start
+        .option("failOnDataLoss", "false")  # topic retention may delete unread data
         .load()
-        .select(F.from_json(F.col("value").cast("string"), SCHEMAS[table]).alias("m"),
-                F.col("timestamp").alias("sys_create_date"))
+        .select(
+            F.from_json(F.col("value").cast("string"), SCHEMAS[table]).alias("m"),
+            F.col("timestamp").alias("sys_create_date"),
+        )
         .select("m.*", "sys_create_date")
     )
     for col, dtype in CASTS.get(table, {}).items():
@@ -95,7 +98,7 @@ def start_raw_ingest(spark: SparkSession, name: str, table: str):
     """
     stream = read_raw_topic(spark, table).withColumn("partition_date", F.to_date("sys_create_date"))
     return (
-        stream.coalesce(1)                      # 1 file per micro-batch and day, not 1 per Kafka partition
+        stream.coalesce(1)  # 1 file per micro-batch and day, not 1 per Kafka partition
         .writeStream.queryName(name)
         .format("parquet")
         .option("path", f"{RAW_ROOT}/{table}")
@@ -109,5 +112,6 @@ def start_raw_ingest(spark: SparkSession, name: str, table: str):
 def start_fact(spark: SparkSession, name: str, table: str, target: str, ddl: str, transform):
     """Topic raw.<table> -> dwh.<target>: create the table if missing, then transform() each micro-batch."""
     ensure_table(spark, ddl)
-    return start_query(name, read_raw_topic(spark, table),
-                       lambda df, batch_id: write_fact(transform(df), target))
+    return start_query(
+        name, read_raw_topic(spark, table), lambda df, batch_id: write_fact(transform(df), target)
+    )

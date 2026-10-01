@@ -1,9 +1,22 @@
-"""Load the route SCD1 dimension from ``default.routes``."""
+"""Load the route SCD1 dimension from the MinIO raw ``routes`` partitions."""
+
 from pyspark.sql import functions as F
-from common import (UNKNOWN_KEY, ensure_table, get_spark, latest_per_key, parse_window,
-                    read_created_between, seed_unknown_member, surrogate_key, with_audit, write_append)
+
+from common import (
+    UNKNOWN_KEY,
+    ensure_table,
+    get_spark,
+    latest_per_key,
+    parse_window,
+    read_created_between,
+    seed_unknown_member,
+    surrogate_key,
+    with_audit,
+    write_append,
+)
 
 TABLE = "dim_route"
+
 DDL = """
     CREATE TABLE IF NOT EXISTS {db}.dim_route
     (
@@ -23,8 +36,19 @@ DDL = """
     ENGINE = ReplacingMergeTree(src_sys_create_date)
     ORDER BY route_id"""
 
-SOURCE_COLUMNS = ["route_id", "origin_city", "origin_state", "destination_city", "destination_state",
-                  "typical_distance_miles", "base_rate_per_mile", "fuel_surcharge_rate", "typical_transit_days", "sys_create_date"]
+SOURCE_COLUMNS = [
+    "route_id",
+    "origin_city",
+    "origin_state",
+    "destination_city",
+    "destination_state",
+    "typical_distance_miles",
+    "base_rate_per_mile",
+    "fuel_surcharge_rate",
+    "typical_transit_days",
+    "sys_create_date",
+]
+
 
 def transform(raw):
     return latest_per_key(raw, ["route_id"]).select(
@@ -34,13 +58,17 @@ def transform(raw):
         "origin_state",
         "destination_city",
         "destination_state",
-        F.col("typical_distance_miles").cast("int").alias("distance_miles"), 
+        F.col("typical_distance_miles").cast("int").alias("distance_miles"),
         F.round("base_rate_per_mile", 2).cast("decimal(18,2)").alias("base_rate"),
         F.round("fuel_surcharge_rate", 2).cast("decimal(18,2)").alias("fuel_surcharge_rate"),
-        F.col("typical_transit_days").cast("int"), F.col("sys_create_date").alias("src_sys_create_date"))
+        F.col("typical_transit_days").cast("int"),
+        F.col("sys_create_date").alias("src_sys_create_date"),
+    )
+
 
 def unknown_member(spark):
-    return spark.sql(f"""SELECT CAST({UNKNOWN_KEY} AS BIGINT) route_key,
+    return spark.sql(
+        f"""SELECT CAST({UNKNOWN_KEY} AS BIGINT) route_key,
                       'UNKNOWN' route_id,
                       'Unknown' origin_city,
                       'Unknown' origin_state,
@@ -52,13 +80,26 @@ def unknown_member(spark):
                       CAST(NULL AS INT) typical_transit_days,
                       CAST('1970-01-01' AS TIMESTAMP) src_sys_create_date
                      """
-                     )
+    )
+
 
 def main():
-    start, end = parse_window(); spark = get_spark(f"{TABLE}_{start}_{end}"); ensure_table(spark, DDL); seed_unknown_member(spark, TABLE, "route_key", unknown_member(spark))
+    start, end = parse_window()
+    spark = get_spark(f"{TABLE}_{start}_{end}")
+    ensure_table(spark, DDL)
+    seed_unknown_member(spark, TABLE, "route_key", unknown_member(spark))
+
     raw = read_created_between(spark, "routes", SOURCE_COLUMNS, start, end).cache()
-    if raw.count(): out = with_audit(transform(raw)).cache(); write_append(out, TABLE); print(f"[{TABLE}] wrote {out.count()} rows")
-    else: print(f"[{TABLE}] window {start}..{end}: read 0 raw rows, nothing to write")
+
+    if raw.count():
+        out = with_audit(transform(raw)).cache()
+        write_append(out, TABLE)
+        print(f"[{TABLE}] wrote {out.count()} rows")
+    else:
+        print(f"[{TABLE}] window {start}..{end}: read 0 raw rows, nothing to write")
+
     spark.stop()
 
-if __name__ == "__main__": main()
+
+if __name__ == "__main__":
+    main()

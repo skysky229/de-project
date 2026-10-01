@@ -9,27 +9,28 @@ Add a job: write streaming/<raw|fact>/<name>.py with start(spark) and list it in
 
     spark-submit --master spark://spark-master:7077 /opt/spark_jobs/streaming/run_all.py
 """
+
 import importlib
 import os
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SPARK_JOBS = os.path.dirname(HERE)
-# makes the `streaming.*` package importable; streaming never imports the batch code (spark_jobs/dwh)
+# makes the `streaming.*` package importable; streaming never imports the batch code (spark_jobs/batch)
 sys.path.insert(0, SPARK_JOBS)
 
 from streaming.helpers import get_spark  # noqa: E402
 
 JOBS = [
-    # raw: topic -> default.<table>, as-is
+    # raw: topic -> MinIO raw/logistics/<table>/partition_date=.../, as-is
     "streaming.raw.raw_trips",
     "streaming.raw.raw_loads",
     "streaming.raw.raw_delivery_events",
     "streaming.raw.raw_fuel_purchases",
     "streaming.raw.raw_maintenance_records",
     "streaming.raw.raw_safety_incidents",
-    # fact: topic(s) -> dwh.fact_*
-    "streaming.fact.fact_trip",                 # stream-stream join trips ⋈ loads (stateful)
+    # fact: topic(s) -> dwh.fact_*_streaming
+    "streaming.fact.fact_trip",  # stream-stream join trips ⋈ loads (stateful)
     "streaming.fact.fact_delivery_event",
     "streaming.fact.fact_fuel_purchase",
     "streaming.fact.fact_maintenance",

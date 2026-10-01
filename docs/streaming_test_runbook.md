@@ -20,8 +20,11 @@ Two helper scripts do the heavy lifting:
 2. **`.env` exists** (`cp .env.example .env`) and has the ClickHouse Cloud settings `DWH_CH_URL`, `DWH_CH_USER`, `DWH_CH_PASSWORD`.
 3. **Images are built:**
    ```bash
-   docker compose build spark-master streamgen
+   docker compose build spark-master streamgen airflow-webserver
    ```
+4. **The bootstrap has run once** (`logistics_bootstrap` DAG, README "Getting started" step 4):
+   the generator reads its driver/truck/route ids from MinIO `raw/csv/`, and streaming `fact_trip`
+   reads routes from `raw/history/routes`. Check in the MinIO console that both folders exist.
 
 ## 1. Start the infrastructure
 
@@ -37,7 +40,7 @@ For a test where every count starts from zero:
 ```bash
 scripts/streaming_reset.sh          # asks for confirmation
 ```
-This deletes the Kafka `raw.*` topics, the streamed raw parquet and the checkpoints in MinIO, and the rows of the 5 `dwh.*_streaming` tables. It keeps the batch tables, the views and the raw ClickHouse tables.
+This deletes the Kafka `raw.*` topics, the streamed raw parquet (`raw/logistics/`) and the checkpoints in MinIO, and the rows of the 5 `dwh.*_streaming` tables. It keeps the bootstrap data (`raw/csv/`, `raw/history/`), the batch tables and the views.
 
 Skipping the reset is fine too. Step 6 can count only the rows created during your test.
 
@@ -53,8 +56,10 @@ The 5 `dwh.*_streaming` tables are created on this first start if they don't exi
 
 ## 4. Create the views (first time, or after column changes)
 
-The views need both the batch table and the streaming table to exist, i.e. after step 3.
-Run every statement in `dwh/views/001_fact_views.sql` in ClickHouse, e.g. in DBeaver (URL in README).
+The views need both the batch table and the streaming table to exist: the streaming ones after step 3,
+the batch ones after the first daily/backfill run of `logistics_dwh_daily`.
+Run every statement in `scripts/fact_views.sql` in ClickHouse, e.g. in DBeaver (URL in README).
+If a fact's columns changed, regenerate the file first: `python3 scripts/generate_fact_views.py`.
 `CREATE OR REPLACE` makes re-running safe.
 ```sql
 SHOW TABLES FROM dwh LIKE 'v_%';      -- ✅ 5 views
@@ -133,7 +138,25 @@ SELECT * FROM dwh.v_fact_maintenance WHERE maintenance_id = 'MAINTTEST-1';      
 ```
 and in MinIO: `raw/logistics/maintenance_records/partition_date=<today>/` has a new file.
 
-## 9. Stop
+## 9. Hand-over test: batch takes over streamed data (optional)
+
+Shows that the daily batch reads the streamed raw partitions and the view switches those rows
+from `streaming` to `batch`. Needs Airflow up and `logistics_dwh_daily` unpaused.
+**Only do this with the generator paused**: loading an unfinished day into batch moves the view's
+cut-off to today, so rows streamed later today would stay hidden until tomorrow's run.
+```sql
+SELECT source, count() FROM dwh.v_fact_trip GROUP BY source;        -- before: batch + streaming
+```
+```bash
+docker compose exec airflow-scheduler airflow dags trigger logistics_dwh_daily \
+  -c '{"start_date": "<today>", "end_date": "<today>"}'           # wait until the run succeeds
+```
+```sql
+SELECT source, count() FROM dwh.v_fact_trip GROUP BY source;        -- after: same total, all 'batch'
+SELECT count() - uniqExact(trip_id) FROM dwh.v_fact_trip;           -- ✅ 0 duplicates
+```
+
+## 10. Stop
 
 ```bash
 docker compose stop streamgen spark-streaming                  # stop the flow, keep all data
@@ -165,5 +188,6 @@ Kafka consumer-group tools don't show Spark's progress: Structured Streaming kee
 | `streaming_check.sh` shows DIFF right after stopping the generator | Last micro-batch not written yet: wait 30–60 s, re-run |
 | DIFF in the `view` column only | The batch table has loaded those days, so the view serves them from batch (as designed) |
 | DIFF for a window older than 72 h | Kafka messages and `_streaming` rows expire after 72 h; MinIO keeps everything |
-| `streamgen` exits at start | Kafka not healthy yet, or ClickHouse Cloud unreachable (it reads dimension ids at start): `docker compose logs streamgen` |
+| First ClickHouse query fails (`NoHttpResponse`, SSL errors) | ClickHouse Cloud was asleep: wait a few seconds and retry |
+| `streamgen` exits at start | Kafka not healthy yet, or the bootstrap CSVs are missing in MinIO `raw/csv/` (it reads dimension ids at start): `docker compose logs streamgen` |
 | Changed a raw job's path/partitioning/format | Its checkpoint no longer fits: run `scripts/streaming_reset.sh`, or delete that table's MinIO folder + `processed/checkpoints/streaming/raw_<table>/` |

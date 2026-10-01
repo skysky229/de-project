@@ -1,29 +1,26 @@
-"""fact_trip (streaming): Kafka raw.trips ⋈ raw.loads -> dwh.fact_trip_streaming  (merge on trip_id)
+"""Load the trip fact by enriching trips with their load attributes in Spark.
 
-Self-contained on purpose: DDL and transform() are copied from the batch job
-(spark_jobs/batch/facts/fact_trip.py) instead of imported, so streaming doesn't depend on
-the batch code. Only the table name differs (fact_trip_streaming, 72 h TTL). The view
-dwh.v_fact_trip unions both tables, so keep the columns identical to the batch job.
-
-The only stateful streaming query: a trip and its load arrive as separate messages,
-possibly in different micro-batches, so Spark buffers each side until its partner
-arrives (stream-stream join on load_id). The watermark + time bound let Spark drop
-buffered rows whose partner is more than 10 minutes apart (the generator publishes
-both at once). Each joined micro-batch is split back into its trip and load columns
-and goes through the batch transform(trips, loads, routes) unchanged.
+planned_miles = the route's typical distance (latest version of each route, all partitions).
 """
 
 from pyspark.sql import functions as F
 
-from streaming.helpers import ensure_table, latest_per_key, surrogate_key, read_raw_all
-from streaming.stream_common import read_raw_topic, start_query, write_fact
+from common import (
+    ensure_table,
+    get_spark,
+    latest_per_key,
+    parse_window,
+    read_created_between,
+    read_raw_all,
+    surrogate_key,
+    with_audit,
+    write_append,
+)
 
-NAME = "fact_trip_streaming"  # also the checkpoint folder name
-TABLE = "fact_trip_streaming"
-MAX_GAP = "10 minutes"
+TABLE = "fact_trip"
 
 DDL = """
-CREATE TABLE IF NOT EXISTS {db}.fact_trip_streaming
+CREATE TABLE IF NOT EXISTS {db}.fact_trip
 (
     trip_key Int64,
     trip_id String,
@@ -53,8 +50,6 @@ CREATE TABLE IF NOT EXISTS {db}.fact_trip_streaming
 )
 ENGINE = ReplacingMergeTree(src_sys_create_date)
 ORDER BY trip_id
-TTL src_sys_create_date + INTERVAL 72 HOUR
-SETTINGS merge_with_ttl_timeout = 3600
 """
 
 TRIP_COLUMNS = [
@@ -139,32 +134,23 @@ def transform(trips, loads, routes):
     )
 
 
-def start(spark):
+def main():
+    start, end = parse_window()
+    spark = get_spark(f"{TABLE}_{start}_{end}")
     ensure_table(spark, DDL)
-    trips = (
-        read_raw_topic(spark, "trips")
-        .select(TRIP_COLUMNS)
-        .withWatermark("sys_create_date", MAX_GAP)
-    )
-    loads = (
-        read_raw_topic(spark, "loads")
-        .select([F.col(c).alias(f"l_{c}") for c in LOAD_COLUMNS])
-        .withWatermark("l_sys_create_date", MAX_GAP)
-    )
-    joined = trips.join(
-        loads,
-        F.expr(
-            f"""
-        load_id = l_load_id
-        AND l_sys_create_date BETWEEN sys_create_date - INTERVAL {MAX_GAP}
-                                  AND sys_create_date + INTERVAL {MAX_GAP}"""
-        ),
-    )
 
-    def handle_batch(df, batch_id):
-        trips_part = df.select(TRIP_COLUMNS)
-        loads_part = df.select([F.col(f"l_{c}").alias(c) for c in LOAD_COLUMNS])
-        # routes re-read each batch: 58 rows, and new routes are picked up without a restart
-        return write_fact(transform(trips_part, loads_part, read_routes(spark)), TABLE)
+    trips = read_created_between(spark, "trips", TRIP_COLUMNS, start, end).cache()
+    loads = read_created_between(spark, "loads", LOAD_COLUMNS, start, end).cache()
 
-    return start_query(NAME, joined, handle_batch)
+    if trips.count() and loads.count():
+        out = with_audit(transform(trips, loads, read_routes(spark))).cache()
+        write_append(out, TABLE)
+        print(f"[{TABLE}] wrote {out.count()} rows")
+    else:
+        print(f"[{TABLE}] window {start}..{end}: no joinable trip/load rows")
+
+    spark.stop()
+
+
+if __name__ == "__main__":
+    main()

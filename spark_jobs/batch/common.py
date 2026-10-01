@@ -1,8 +1,8 @@
-"""Shared helpers for the logistics DWH Spark jobs (spark_jobs/dwh/{dim,fact,mart}).
+"""Shared helpers for the logistics DWH Spark jobs (spark_jobs/batch/{dim,fact,mart}).
 
 Every job follows the same shape, one target table per file:
     1. ensure its target table exists (CREATE TABLE IF NOT EXISTS, ReplacingMergeTree)
-    2. extract: read raw rows created in [start, end] from ClickHouse
+    2. extract: read raw rows created in [start, end] from MinIO (the partition_date folders of the window)
     3. transform in Spark
     4. load: append to ClickHouse; ReplacingMergeTree merges rows on the business key
 
@@ -11,26 +11,35 @@ Every target table carries two timestamps:
                          newest *source* row wins no matter which load ran last (safe re-runs)
     etl_loaded_date      when the job wrote the row (audit only)
 
-ClickHouse only filters (the WHERE clause is pushed down) and stores; all
-transformation happens in Spark.
+Raw data lives in MinIO, partitioned by partition_date = toDate(sys_create_date):
+    DWH_RAW_HISTORY_ROOT  s3a://raw/history/<table>/    one-time bootstrap from the CSVs, all 14 tables
+    DWH_RAW_STREAM_ROOT   s3a://raw/logistics/<table>/  written by the streaming app (6 tables)
+ClickHouse is the warehouse only (dwh); the old raw tables in `default` are no longer read.
+All transformation happens in Spark.
 
 Shipped to the cluster with spark-submit --py-files .../common.py.
 
 Config (env vars on the driver; JDBC options travel to executors with the plan):
     DWH_CH_URL       https://<host>:8443
     DWH_CH_USER / DWH_CH_PASSWORD
-    DWH_SOURCE_DB    raw tables (default: default)
     DWH_TARGET_DB    star schema (default: dwh)
+    DWH_RAW_HISTORY_ROOT / DWH_RAW_STREAM_ROOT   see above
+The s3a:// credentials come from spark.hadoop.fs.s3a.* (set by the DAG).
 """
+
 import argparse
 import os
 from datetime import date
 
+from functools import reduce
+
 from pyspark.sql import Column, DataFrame, SparkSession, Window
 from pyspark.sql import functions as F
+from pyspark.sql.utils import AnalysisException
 
-SOURCE_DB = os.environ.get("DWH_SOURCE_DB", "default")
 TARGET_DB = os.environ.get("DWH_TARGET_DB", "dwh")
+RAW_HISTORY_ROOT = os.environ.get("DWH_RAW_HISTORY_ROOT", "s3a://raw/history")
+RAW_STREAM_ROOT = os.environ.get("DWH_RAW_STREAM_ROOT", "s3a://raw/logistics")
 UNKNOWN_KEY = -1
 
 _JDBC_URL = "jdbc:clickhouse:" + os.environ["DWH_CH_URL"].rstrip("/")
@@ -43,6 +52,7 @@ _JDBC_OPTIONS = {
 
 
 # ---------------------------------------------------------------------- setup
+
 
 def parse_window() -> tuple:
     """--job-date D (daily) or --start-date/--end-date (backfill). Returns (start, end) ISO strings."""
@@ -66,12 +76,12 @@ def get_spark(app_name: str) -> SparkSession:
     return (
         SparkSession.builder.appName(app_name)
         # source timestamps carry no zone; keep day boundaries in UTC
-        .config("spark.sql.session.timeZone", "UTC")
-        .getOrCreate()
+        .config("spark.sql.session.timeZone", "UTC").getOrCreate()
     )
 
 
 # ----------------------------------------------------------------- ClickHouse
+
 
 def _connection(spark: SparkSession):
     jvm = spark.sparkContext._jvm
@@ -121,13 +131,39 @@ def seed_unknown_member(spark: SparkSession, table: str, key_column: str, row: D
         print(f"[{table}] seeded Unknown member ({key_column} = {UNKNOWN_KEY})")
 
 
-def read_created_between(spark: SparkSession, table: str, columns: list, start: str, end: str) -> DataFrame:
-    """Raw rows recorded in [start, end]. Raw tables are append-only, so this is the day's delta."""
-    return read_query(
-        spark,
-        f"SELECT {', '.join(columns)} FROM {SOURCE_DB}.{table} "
-        f"WHERE toDate(sys_create_date) BETWEEN '{start}' AND '{end}'",
-    )
+def _raw_sources(spark: SparkSession, table: str) -> list:
+    """The table's raw parquet in MinIO: the history folder, plus the streaming folder if the
+    table is streamed. The streaming folder is read through its _spark_metadata log, so files
+    of micro-batches that never committed are ignored."""
+    frames = []
+    for root in (RAW_HISTORY_ROOT, RAW_STREAM_ROOT):
+        try:
+            frames.append(spark.read.parquet(f"{root}/{table}"))
+        except AnalysisException:  # folder doesn't exist (e.g. a table that isn't streamed)
+            pass
+    if not frames:
+        raise FileNotFoundError(
+            f"no raw data for '{table}' under {RAW_HISTORY_ROOT} or {RAW_STREAM_ROOT}: "
+            f"run the logistics_bootstrap DAG first"
+        )
+    return frames
+
+
+def read_created_between(
+    spark: SparkSession, table: str, columns: list, start: str, end: str
+) -> DataFrame:
+    """Raw rows recorded in [start, end]: only the partition_date folders of that window are read.
+
+    Raw data is append-only, so this is the window's delta. History and streamed rows are unioned.
+    """
+    in_window = F.col("partition_date").between(F.lit(start).cast("date"), F.lit(end).cast("date"))
+    frames = [df.filter(in_window).select(*columns) for df in _raw_sources(spark, table)]
+    return reduce(DataFrame.unionByName, frames)
+
+
+def read_raw_all(spark: SparkSession, table: str, columns: list) -> DataFrame:
+    """All raw rows of a (small) table, every partition: for lookups such as routes."""
+    return reduce(DataFrame.unionByName, [df.select(*columns) for df in _raw_sources(spark, table)])
 
 
 def read_query(spark: SparkSession, sql: str) -> DataFrame:
@@ -140,7 +176,7 @@ def read_query(spark: SparkSession, sql: str) -> DataFrame:
 
 
 def write_append(df: DataFrame, table: str, database: str = TARGET_DB) -> None:
-    """Batched JDBC append into <database>.<table> (the dwh by default; streaming ingest passes SOURCE_DB)."""
+    """Batched JDBC append into <database>.<table> (the dwh by default)."""
     (
         df.write.format("jdbc")
         .options(**_JDBC_OPTIONS)
@@ -154,6 +190,7 @@ def write_append(df: DataFrame, table: str, database: str = TARGET_DB) -> None:
 
 
 # ------------------------------------------------------------------ transform
+
 
 def latest_per_key(df: DataFrame, keys: list, version: str = "sys_create_date") -> DataFrame:
     """Keep one row per business key: the latest version in this batch."""

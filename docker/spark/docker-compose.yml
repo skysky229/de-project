@@ -45,8 +45,8 @@ services:
       DWH_CH_URL: ${DWH_CH_URL}
       DWH_CH_USER: ${DWH_CH_USER}
       DWH_CH_PASSWORD: ${DWH_CH_PASSWORD}
-      DWH_SOURCE_DB: ${DWH_SOURCE_DB}
       DWH_TARGET_DB: ${DWH_TARGET_DB}
+      DWH_RAW_HISTORY_ROOT: s3a://${MINIO_BUCKET_RAW}/history   # lookups (routes) for fact_trip
     command:
       - spark-submit
       - --master

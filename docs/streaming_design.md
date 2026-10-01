@@ -1,4 +1,4 @@
-# Plan: Real-time streaming (Generator → Kafka → Spark Structured Streaming → MinIO + ClickHouse)
+# Streaming design (Generator → Kafka → Spark Structured Streaming → MinIO + ClickHouse)
 
 ```
  event generator ──▶ Kafka topics ──▶ Spark Streaming ──┬──▶ MinIO s3a://raw/logistics/   (raw, parquet)
@@ -6,7 +6,7 @@
                                                                ▲
                         daily batch DAG ──▶ dwh.<fact> ────────┴── view dwh.v_<fact> combines both
 ```
-Status: implemented (phases 1–3) and tested; see README "Streaming" for how to run and check it.
+Implemented and tested. How to run and check it: [streaming_test_runbook.md](streaming_test_runbook.md).
 
 ## 1. Event generator
 - A small Python script (`streamgen`) publishes new random events to Kafka at a configurable rate (default: 1 trip per second).
@@ -14,7 +14,7 @@ Status: implemented (phases 1–3) and tested; see README "Streaming" for how to
   - New ids with an `S` marker + the generator's start time (e.g. `TRIPS1790504323-000005`).
   - Random values in realistic ranges (weight, miles, revenue, gallons, ...).
   - Timestamps = now.
-- Foreign keys point at **existing** drivers, trucks, trailers, customers, routes and facilities (picked at random), so the facts join to the dimensions.
+- Foreign keys point at **existing** drivers, trucks, trailers, customers, routes and facilities (picked at random from the bootstrap CSVs in MinIO `raw/csv/`), so the facts join to the dimensions.
 - Per trip it publishes: 1 load + 1 trip, then a pickup and a delivery event and 1–2 fuel purchases a few seconds later, and occasionally an incident. Maintenance records are published independently (a few per minute).
 
 ## 2. Kafka
@@ -25,7 +25,7 @@ Status: implemented (phases 1–3) and tested; see README "Streaming" for how to
 
 ## 3. Spark Structured Streaming
 - `readStream.format("kafka")` per topic, parse JSON with a fixed schema, micro-batch every 30 s.
-- Checkpoints in MinIO (`s3a://processed/checkpoints/<job>/`), so a restart continues where it stopped.
+- Checkpoints in MinIO (`s3a://processed/checkpoints/streaming/<query>/`), so a restart continues where it stopped.
 - **Stateless:** parse → dedup inside the micro-batch → write. No watermark, except in `fact_trip` (see below).
 
 ## 4. Write (one table per file, one query per file)
@@ -36,27 +36,28 @@ Status: implemented (phases 1–3) and tested; see README "Streaming" for how to
 
 - Raw jobs: Spark's parquet file sink, 1 file per micro-batch and day, committed files listed in `_spark_metadata/`.
 - Fact jobs: `foreachBatch` → `latest_per_key()` → `write_append()` into `dwh.<fact>_streaming`.
-- Streaming is **self-contained**: helpers (`streaming/helpers.py`), each fact's DDL and `transform()` are copied from the batch code, not imported, so streaming doesn't depend on it (owned by someone else). The view `dwh.v_<fact>` unions the batch and streaming tables, so their columns (and key/money logic) must stay identical: keep the copies in sync by hand.
-- Each fact stores only the keys its own raw row has, plus `trip_id` to join to `fact_trip` when needed (e.g. customer of a delivery event).
+- Streaming is **self-contained**: helpers (`streaming/helpers.py`), each fact's DDL and `transform()` are copied from the batch jobs in `spark_jobs/batch/facts/`, not imported. Only the table name differs (`<fact>_streaming`, 72 h TTL). The view `dwh.v_<fact>` unions both tables, so their columns (and key/money logic) must stay identical: keep the copies in sync by hand, then run `scripts/generate_fact_views.py`.
+- Each fact stores only the keys its own raw row has; delivery events, fuel purchases and incidents carry `trip_key` (= `fact_trip.trip_key`, a hash of `trip_id`) to reach the trip's customer/route.
+- `fact_trip` looks up `planned_miles` in routes, read from MinIO `raw/history/routes` (routes aren't streamed).
 - **`fact_trip`** needs `trips` ⋈ `loads`: a stream-stream join on `load_id` with a 10 min watermark. It's the only stateful query.
 - Replays and duplicates are harmless: `dwh` tables merge on the business key (ReplacingMergeTree).
 
 ## 4b. Serving: batch + streaming views (Lambda)
-- Raw data: streaming lands it in MinIO (`s3a://raw/logistics/<table>/partition_date=.../`), not in ClickHouse `default.*`. The batch DAG only sees it if it also reads those folders (batch owner's part); until then streamed data is only in the `_streaming` tables (72 h).
+- Raw data: streaming lands it in MinIO (`s3a://raw/logistics/<table>/partition_date=.../`). The daily batch DAG reads those folders together with the bootstrap history (`raw/history/`), so streamed events reach the batch tables on the next daily run. ClickHouse `default.*` is retired.
 - Transformed data: batch writes `dwh.<fact>`, streaming writes `dwh.<fact>_streaming`.
 - `dwh.v_<fact>` = batch rows with `toDate(src_sys_create_date) <= C` + streaming rows with `> C`, where
   **C = the last day the batch table has loaded** (`max(toDate(src_sys_create_date))`). Not `today() - 1`,
   so there's no gap between midnight and the moment the nightly batch run finishes.
-- No overlap: the batch run for day D reads exactly the raw rows created on D.
+- No overlap: the batch run for day D reads exactly the raw partitions `partition_date = D`.
 - `_streaming` rows expire after **72 h** (ClickHouse TTL), long enough to cover a late batch run.
-  (Better long-term: the batch job deletes the streaming rows it has taken over; that's the batch owner's part.)
+  (Better long-term: the batch job deletes the streaming rows it has taken over.)
 - Known, accepted gap: if streaming catches up *after* the batch run for that day, those late rows are in neither layer.
 
 ## 5. Run
 - One long-lived Spark application (`streaming/run_all.py`) starts all 11 queries (6 raw + 5 fact). Compose service `spark-streaming` runs it, not Airflow; it uses 2 of the worker's 4 cores.
-- Check it in: the Spark UI (Structured Streaming tab), the MinIO console (bucket `raw`), and row counts in ClickHouse (`_streaming` tables and `v_*` views). Commands: README "Streaming".
+- Check it in: the Spark UI (Structured Streaming tab), the MinIO console (bucket `raw`), and row counts in ClickHouse (`_streaming` tables and `v_*` views). Commands: [streaming_test_runbook.md](streaming_test_runbook.md).
 
-## 6. Stack changes
+## 6. Components
 | Change | Why |
 |---|---|
 | `docker/kafka/` | Kafka broker |
@@ -64,9 +65,4 @@ Status: implemented (phases 1–3) and tested; see README "Streaming" for how to
 | Spark image + Kafka connector jars (`spark-sql-kafka-0-10_2.12:3.5.1`) | Spark reads Kafka |
 | `spark-streaming` service (in `docker/spark/`) | Runs the streaming application |
 | `spark-worker`: 2 → 4 cores, 2 → 4 GB | Streaming + batch at the same time |
-| `dwh/views/001_fact_views.sql` | The 5 `v_<fact>` views |
-
-## 7. Phases
-1. Kafka + generator + `delivery_events` end-to-end (raw + fact).
-2. `trips` + `loads` → raw + `fact_trip`.
-3. Fuel, maintenance, incidents.
+| `scripts/fact_views.sql` | The 5 `v_<fact>` views |
