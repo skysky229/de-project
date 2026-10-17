@@ -40,7 +40,7 @@ Working reference: `spark_jobs/batch/dims/dim_driver.py`.
 | `empty_to_null(col)` | Turn `''` into NULL |
 | `with_audit(df)` | Add `etl_loaded_date` |
 | `write_append(df, table)` | Batched JDBC append into `dwh.<table>` |
-| `execute(spark, sql)` / `query_scalar(spark, sql)` | Run a DDL statement / read one value on the driver |
+| `execute(spark, sql)` / `query_scalar(spark, sql)` / `query_row(spark, sql)` | Run a DDL statement / read one value / read one row on the driver |
 
 ## 3. Step by step
 
@@ -119,7 +119,13 @@ The DAG creates one task per name inside the layer's TaskGroup (`dims.dim_truck`
 Groups run in order `dims → facts → mart`. The folder name is the group name, so a new
 dim goes in `spark_jobs/batch/dims/`, a fact in `spark_jobs/batch/facts/`. No other DAG change is needed.
 
-### Step 3: Test (see section 7), then check the DAG parses
+### Step 3: Add its data-quality rules
+
+Add the table to `DIMS` or `FACTS` in `spark_jobs/dq/fact_rules.py` (id, keys, ranges, accepted
+values, business rules). The DAG's last task, `dq.dq_batch`, then checks it on every run. See
+[data_quality.md](data_quality.md).
+
+### Step 4: Test (see section 7), then check the DAG parses
 
 ```bash
 docker compose exec airflow-scheduler airflow dags list-import-errors

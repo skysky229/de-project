@@ -5,7 +5,7 @@ small cluster. Each job module stays one-table-per-file and exposes start(spark)
 If any query dies, the application exits non-zero and the `spark-streaming`
 container restarts it; checkpoints make every query resume where it stopped.
 
-Add a job: write streaming/<raw|fact>/<name>.py with start(spark) and list it in JOBS.
+Add a job: write streaming/<raw|fact|dq>/<name>.py with start(spark) and list it in JOBS.
 
     spark-submit --master spark://spark-master:7077 /opt/spark_jobs/streaming/run_all.py
 """
@@ -35,6 +35,8 @@ JOBS = [
     "streaming.fact.fact_fuel_purchase",
     "streaming.fact.fact_maintenance",
     "streaming.fact.fact_safety_incident",
+    # data quality: messages the queries above reject -> dwh.dq_dead_letter
+    "streaming.dq.dead_letter",
 ]
 
 

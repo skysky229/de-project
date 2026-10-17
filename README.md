@@ -19,13 +19,19 @@ streamgen ─▶ Kafka ─▶ spark-streaming ─┼─▶ MinIO raw/logistics/ 
 - **Streaming**: every 30 s it lands Kafka events in MinIO and writes the facts to `dwh.<fact>_streaming`.
 - **Views** `dwh.v_<fact>` serve batch rows up to the last day batch has loaded, plus newer
   streaming rows. Query these.
+- **Data quality**: the daily DAG ends with a DQ task, the DAG `logistics_streaming_dq` checks the
+  streaming layer every 15 min, and invalid Kafka messages go to `dwh.dq_dead_letter`. All results
+  land in `dwh.dq_results`.
 
 ## Repository
 
 ```
-dags/              Airflow DAGs: logistics_bootstrap (one-time), logistics_dwh_daily (daily batch)
+dags/              Airflow DAGs: logistics_bootstrap (one-time), logistics_dwh_daily (daily batch),
+                   logistics_streaming_dq (streaming data quality, every 15 min)
 spark_jobs/batch/      batch ETL: bootstrap/, dims/, facts/, common.py (one file = one table = one task)
-spark_jobs/streaming/  Structured Streaming: raw/ (Kafka -> MinIO), fact/ (Kafka -> dwh.*_streaming)
+spark_jobs/streaming/  Structured Streaming: raw/ (Kafka -> MinIO), fact/ (Kafka -> dwh.*_streaming),
+                       dq/ (rejected messages -> dwh.dq_dead_letter)
+spark_jobs/dq/         data-quality checks: rules (fact_rules.py), batch + streaming runners
 scripts/           fact_views.sql (the views), generate_fact_views.py, streaming_check.sh, streaming_reset.sh
 docker/            one folder per service (Dockerfile + compose file); streamgen/ = event generator
 docs/              how_to_add_a_table.md, streaming_design.md, streaming_test_runbook.md, architecture.drawio
@@ -77,6 +83,7 @@ The `compress=0` in that URL is required for older JDBC drivers (0.5/0.6).
 
 - **Adding or changing a batch table:** [docs/how_to_add_a_table.md](docs/how_to_add_a_table.md)
 - **Streaming design:** [docs/streaming_design.md](docs/streaming_design.md)
+- **Data quality (checks, dead letters, reading `dwh.dq_results`):** [docs/data_quality.md](docs/data_quality.md)
 - **Testing streaming end to end, plus the check and reset scripts:**
   [docs/streaming_test_runbook.md](docs/streaming_test_runbook.md)
 - **After changing a fact's columns:** change the batch job and its copy in

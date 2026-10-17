@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Compare every streamed table across all layers:
-#   Kafka messages  =  MinIO raw parquet rows  =  dwh.<fact>_streaming rows  =  view rows (source = 'streaming')
+#   Kafka messages - dead letters  =  MinIO raw parquet rows  =  dwh.<fact>_streaming rows  =  view rows (source = 'streaming')
 #
 #   scripts/streaming_check.sh                          # everything still in Kafka
 #   scripts/streaming_check.sh "2026-09-30 08:00:00"    # only rows recorded since then (UTC)
@@ -18,9 +18,11 @@ SINCE="${1:-}"
 if [[ -n "$SINCE" ]]; then
   SINCE_MS=$(python3 -c "import datetime,sys; print(int(datetime.datetime.strptime(sys.argv[1], '%Y-%m-%d %H:%M:%S').replace(tzinfo=datetime.timezone.utc).timestamp() * 1000))" "$SINCE")
   CH_FILTER="src_sys_create_date >= toDateTime('$SINCE', 'UTC')"
+  DL_FILTER="kafka_timestamp >= toDateTime('$SINCE', 'UTC')"
 else
   SINCE_MS=-2          # Kafka's "earliest offset still retained"
   CH_FILTER="1"
+  DL_FILTER="1"
 fi
 
 ch() { curl -sS --fail-with-body --user "$DWH_CH_USER:$DWH_CH_PASSWORD" --data-binary "$1" "$DWH_CH_URL"; }
@@ -50,11 +52,13 @@ STREAMS="trips:fact_trip loads:fact_trip delivery_events:fact_delivery_event fue
 
 echo
 echo "Window: ${SINCE:-everything still in Kafka} (UTC)"
-printf "%-20s %8s %8s %8s %11s %10s  %s\n" stream kafka minio minio_ids _streaming view status
+printf "%-20s %8s %8s %8s %11s %10s  %s\n" stream kafka-dl minio minio_ids _streaming view status
 status=0
 for pair in $STREAMS; do
   table=${pair%%:*}; fact=${pair##*:}
-  k=$(kafka_count "raw.$table")
+  # rejected messages (dwh.dq_dead_letter) never reach MinIO or the facts; 0 if the table doesn't exist yet
+  dl=$(ch "SELECT count() FROM ${DWH_TARGET_DB}.dq_dead_letter FINAL WHERE topic = 'raw.$table' AND $DL_FILTER" 2>/dev/null) || dl=0
+  k=$(( $(kafka_count "raw.$table") - dl ))
   read -r m mids <<< "$(awk -v t="$table" '$2 == t {print $3, $4}' <<< "$LAKE")"
   s=$(ch "SELECT count() FROM ${DWH_TARGET_DB}.${fact}_streaming FINAL WHERE $CH_FILTER")
   v=$(ch "SELECT count() FROM ${DWH_TARGET_DB}.v_${fact} WHERE source = 'streaming' AND $CH_FILTER")

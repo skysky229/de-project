@@ -17,7 +17,10 @@ Message = one raw-table row as JSON (column names = raw table columns),
 key = the row's business key. sys_create_date is NOT in the message: the
 ingest job stamps it with the Kafka record time.
 
-Env: KAFKA_BOOTSTRAP, TRIPS_PER_SECOND, MAINTENANCE_PER_MINUTE,
+BAD_MESSAGE_RATE (default 0) corrupts that share of messages (broken JSON, missing business
+key, or an unparseable date), to exercise the dead-letter path (dwh.dq_dead_letter).
+
+Env: KAFKA_BOOTSTRAP, TRIPS_PER_SECOND, MAINTENANCE_PER_MINUTE, BAD_MESSAGE_RATE,
      MINIO_ENDPOINT / MINIO_ROOT_USER / MINIO_ROOT_PASSWORD / MINIO_BUCKET_RAW / MINIO_CSV_PREFIX
 """
 import csv
@@ -37,6 +40,7 @@ from minio import Minio
 BOOTSTRAP = os.environ.get("KAFKA_BOOTSTRAP", "kafka:9092")
 TRIPS_PER_SECOND = float(os.environ.get("TRIPS_PER_SECOND", "1"))
 MAINTENANCE_PER_MINUTE = float(os.environ.get("MAINTENANCE_PER_MINUTE", "3"))
+BAD_MESSAGE_RATE = float(os.environ.get("BAD_MESSAGE_RATE", "0"))
 
 TOPICS = ["raw.loads", "raw.trips", "raw.delivery_events", "raw.fuel_purchases",
           "raw.maintenance_records", "raw.safety_incidents"]
@@ -166,11 +170,27 @@ def make_maintenance(ref: dict, at: datetime) -> dict:
     }
 
 
+def corrupt(topic: str, row: dict) -> str:
+    """A deliberately invalid message for `row`: what the streaming app must dead-letter."""
+    kind = random.choice(["json", "key", "date"])
+    if kind == "json":
+        return json.dumps(row)[:-7]                      # truncated: not JSON any more
+    bad = dict(row)
+    if kind == "key":
+        bad[BUSINESS_KEY[topic]] = ""
+    else:
+        bad[DATE_COLUMN[topic]] = "not-a-date"
+    return json.dumps(bad)
+
+
 # --------------------------------------------------------------------- main
 
 BUSINESS_KEY = {"raw.loads": "load_id", "raw.trips": "trip_id", "raw.delivery_events": "event_id",
                 "raw.fuel_purchases": "fuel_purchase_id", "raw.maintenance_records": "maintenance_id",
                 "raw.safety_incidents": "incident_id"}
+DATE_COLUMN = {"raw.loads": "load_date", "raw.trips": "dispatch_date", "raw.delivery_events": "actual_datetime",
+               "raw.fuel_purchases": "purchase_date", "raw.maintenance_records": "maintenance_date",
+               "raw.safety_incidents": "incident_date"}
 
 
 def main():
@@ -195,7 +215,9 @@ def main():
     signal.signal(signal.SIGINT, request_stop)
 
     def publish(topic: str, row: dict):
-        producer.produce(topic, key=row[BUSINESS_KEY[topic]], value=json.dumps(row))
+        bad = random.random() < BAD_MESSAGE_RATE
+        value = corrupt(topic, row) if bad else json.dumps(row)
+        producer.produce(topic, key=row[BUSINESS_KEY[topic]], value=value)
         sent[topic] += 1
 
     n, next_trip, last_report = 0, time.time(), time.time()
