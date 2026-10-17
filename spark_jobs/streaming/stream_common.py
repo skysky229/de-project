@@ -9,7 +9,8 @@ Two standard query shapes cover almost every job:
     start_fact(spark, name, table, target, ddl, transform)
                                                 topic raw.<table> -> dwh.<target>, via the
                                                 job's own transform()
-Both are stateless. Raw ingest uses Spark's file sink (exactly-once: committed files are
+Both read through read_raw_topic(), which drops invalid messages (see validation_error());
+dq/dead_letter.py stores those in dwh.dq_dead_letter. Both are stateless. Raw ingest uses Spark's file sink (exactly-once: committed files are
 listed in <path>/_spark_metadata, so a replayed batch never duplicates files); facts use
 foreachBatch and ClickHouse absorbs replays. Only fact_trip (stream-stream join) keeps state.
 Kafka offsets (and fact_trip's join state) are checkpointed in MinIO, so a restart
@@ -21,12 +22,13 @@ s3a://raw/logistics), STREAM_TRIGGER (default "30 seconds").
 """
 
 import os
+from functools import reduce
 
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
 
 from streaming.helpers import ensure_table, with_audit, write_append
-from streaming.schemas import CASTS, SCHEMAS
+from streaming.schemas import CASTS, REQUIRED, SCHEMAS
 
 KAFKA_BOOTSTRAP = os.environ.get("KAFKA_BOOTSTRAP", "kafka:9092")
 CHECKPOINT_ROOT = os.environ.get("STREAM_CHECKPOINT_ROOT", "s3a://processed/checkpoints/streaming")
@@ -34,23 +36,57 @@ RAW_ROOT = os.environ.get("STREAM_RAW_ROOT", "s3a://raw/logistics")
 TRIGGER = os.environ.get("STREAM_TRIGGER", "30 seconds")
 
 
+def read_kafka(spark: SparkSession, topics: list) -> DataFrame:
+    """The Kafka source: one row per message (key, value, topic, partition, offset, timestamp)."""
+    return (
+        spark.readStream.format("kafka")
+        .option("kafka.bootstrap.servers", KAFKA_BOOTSTRAP)
+        .option("subscribe", ",".join(topics))
+        .option("startingOffsets", "earliest")  # only used on the very first start
+        .option("failOnDataLoss", "false")  # topic retention may delete unread data
+        .load()
+    )
+
+
+def parse_json(table: str):
+    """The message value parsed with the table's schema, as struct column `m`."""
+    return F.from_json(F.col("value").cast("string"), SCHEMAS[table]).alias("m")
+
+
+def validation_error(table: str):
+    """Why a parsed message (struct column `m`) is unusable, '' if it's fine.
+
+    Unusable = not JSON, or a REQUIRED column is missing/empty, or doesn't cast to its type
+    (e.g. a date that isn't one). Such a row would otherwise land in the lake with a NULL key,
+    or break the fact insert (date_key is not Nullable).
+    """
+    casts = CASTS.get(table, {})
+    # from_json gives a struct of all NULLs (not a NULL) for text that isn't a JSON object
+    fields = [F.col(f"m.{name}").isNull() for name in SCHEMAS[table].fieldNames()]
+    malformed = F.col("m").isNull() | reduce(lambda a, b: a & b, fields)
+    problems = []
+    for col in REQUIRED[table]:
+        value = F.col(f"m.{col}")
+        empty = value.isNull() | (F.trim(value.cast("string")) == "")
+        problems.append(F.when(empty, F.lit(f"missing {col}")))
+        if col in casts:
+            problems.append(
+                F.when(~empty & value.cast(casts[col]).isNull(), F.lit(f"invalid {col}"))
+            )
+    return F.when(malformed, F.lit("malformed JSON")).otherwise(F.concat_ws("; ", *problems))
+
+
 def read_raw_topic(spark: SparkSession, table: str) -> DataFrame:
     """Topic raw.<table> -> rows shaped like the raw table (same columns as raw/history/<table>, incl. sys_create_date).
 
     sys_create_date = the Kafka record timestamp: when the platform received the event.
     It's stable across replays (unlike now()), so a replayed micro-batch produces identical rows.
+    Invalid messages (validation_error) are dropped here; dq/dead_letter.py keeps them.
     """
     df = (
-        spark.readStream.format("kafka")
-        .option("kafka.bootstrap.servers", KAFKA_BOOTSTRAP)
-        .option("subscribe", f"raw.{table}")
-        .option("startingOffsets", "earliest")  # only used on the very first start
-        .option("failOnDataLoss", "false")  # topic retention may delete unread data
-        .load()
-        .select(
-            F.from_json(F.col("value").cast("string"), SCHEMAS[table]).alias("m"),
-            F.col("timestamp").alias("sys_create_date"),
-        )
+        read_kafka(spark, [f"raw.{table}"])
+        .select(parse_json(table), F.col("timestamp").alias("sys_create_date"))
+        .where(validation_error(table) == "")
         .select("m.*", "sys_create_date")
     )
     for col, dtype in CASTS.get(table, {}).items():

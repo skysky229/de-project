@@ -4,6 +4,11 @@ Columns = the raw ClickHouse table's columns, without sys_create_date (read_raw_
 adds it from the Kafka record time). Dates/timestamps travel as strings
 ("2026-09-27" / "2026-09-27 10:15:00.123456") and are cast after parsing
 (the CASTS map); from_json's own date parsing is format-sensitive.
+
+REQUIRED lists, per table, the columns a message can't do without: the business key and the
+date the fact's date_key comes from. A message that isn't JSON, or lacks one of them, or has
+one that doesn't cast, goes to the dead-letter table (dwh.dq_dead_letter) instead of the lake
+and the facts; see stream_common.validation_error().
 """
 
 from pyspark.sql.types import DoubleType, LongType, StringType, StructField, StructType
@@ -111,4 +116,14 @@ CASTS = {
     "fuel_purchases": {"purchase_date": "timestamp"},
     "maintenance_records": {"maintenance_date": "date"},
     "safety_incidents": {"incident_date": "timestamp"},
+}
+
+# columns a valid message must carry (non-empty, and castable when listed in CASTS)
+REQUIRED = {
+    "delivery_events": ["event_id", "trip_id", "event_type", "scheduled_datetime", "actual_datetime"],
+    "trips": ["trip_id", "load_id", "dispatch_date"],
+    "loads": ["load_id", "load_date"],
+    "fuel_purchases": ["fuel_purchase_id", "purchase_date"],
+    "maintenance_records": ["maintenance_id", "maintenance_date"],
+    "safety_incidents": ["incident_id", "incident_date"],
 }

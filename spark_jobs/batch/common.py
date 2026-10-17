@@ -113,6 +113,21 @@ def query_scalar(spark: SparkSession, sql: str):
         conn.close()
 
 
+def query_row(spark: SparkSession, sql: str):
+    """Run a query on the driver; returns its first row as a list of str (None if no row).
+
+    Used by the data-quality checks (spark_jobs/dq), whose queries return one summary row.
+    """
+    conn = _connection(spark)
+    try:
+        rs = conn.createStatement().executeQuery(sql)
+        if not rs.next():
+            return None
+        return [rs.getString(i) for i in range(1, rs.getMetaData().getColumnCount() + 1)]
+    finally:
+        conn.close()
+
+
 def ensure_table(spark: SparkSession, ddl: str) -> None:
     execute(spark, f"CREATE DATABASE IF NOT EXISTS {TARGET_DB}")
     execute(spark, ddl.format(db=TARGET_DB))

@@ -26,6 +26,7 @@ Implemented and tested. How to run and check it: [streaming_test_runbook.md](str
 ## 3. Spark Structured Streaming
 - `readStream.format("kafka")` per topic, parse JSON with a fixed schema, micro-batch every 30 s.
 - Checkpoints in MinIO (`s3a://processed/checkpoints/streaming/<query>/`), so a restart continues where it stopped.
+- **Validation:** a message that isn't JSON, or lacks its business key or date (or the date doesn't parse) is dropped by every query and stored by the `dq_dead_letter` query in `dwh.dq_dead_letter` instead. See [data_quality.md](data_quality.md).
 - **Stateless:** parse → dedup inside the micro-batch → write. No watermark, except in `fact_trip` (see below).
 
 ## 4. Write (one table per file, one query per file)
@@ -54,7 +55,7 @@ Implemented and tested. How to run and check it: [streaming_test_runbook.md](str
 - Known, accepted gap: if streaming catches up *after* the batch run for that day, those late rows are in neither layer.
 
 ## 5. Run
-- One long-lived Spark application (`streaming/run_all.py`) starts all 11 queries (6 raw + 5 fact). Compose service `spark-streaming` runs it, not Airflow; it uses 2 of the worker's 4 cores.
+- One long-lived Spark application (`streaming/run_all.py`) starts all 12 queries (6 raw + 5 fact + 1 dead-letter). Compose service `spark-streaming` runs it, not Airflow; it uses 2 of the worker's 4 cores.
 - Check it in: the Spark UI (Structured Streaming tab), the MinIO console (bucket `raw`), and row counts in ClickHouse (`_streaming` tables and `v_*` views). Commands: [streaming_test_runbook.md](streaming_test_runbook.md).
 
 ## 6. Components

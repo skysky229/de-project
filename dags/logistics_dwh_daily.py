@@ -5,6 +5,8 @@ are grouped by layer into TaskGroups that run in order:
     dims  (spark_jobs/batch/dims/<table>.py)    first: facts depend on their keys
     facts (spark_jobs/batch/facts/<table>.py)   after the whole dimension group
     mart (spark_jobs/batch/mart/<table>.py)  after the whole fact group
+    dq    (spark_jobs/dq/dq_batch.py)        last: data-quality checks of what the run loaded,
+                                             results in dwh.dq_results (docs/data_quality.md)
 Task ids are <group>.<table>, e.g. dims.dim_driver.
 
 Each run reads only the raw partitions of its logical date ({{ ds }}):
@@ -28,6 +30,7 @@ from airflow.providers.apache.spark.operators.spark_submit import SparkSubmitOpe
 from airflow.utils.task_group import TaskGroup
 
 JOBS_DIR = "/opt/airflow/spark_jobs/batch"
+DQ_DIR = "/opt/airflow/spark_jobs/dq"
 
 # one entry per target table = one job file = one task
 DIM_TABLES = [
@@ -75,8 +78,9 @@ with DAG(
     tags=["dwh", "logistics", "spark"],
 ) as dag:
 
-    def spark_task(layer: str, table: str) -> SparkSubmitOperator:
-        return SparkSubmitOperator(
+    def spark_task(layer: str, table: str, **overrides) -> SparkSubmitOperator:
+        """overrides: SparkSubmitOperator arguments that differ from a table job's (e.g. the DQ job)."""
+        kwargs = dict(
             task_id=table,
             application=f"{JOBS_DIR}/{layer}/{table}.py",
             py_files=f"{JOBS_DIR}/common.py",
@@ -91,6 +95,7 @@ with DAG(
             ],
             env_vars=DWH_ENV,
         )
+        return SparkSubmitOperator(**{**kwargs, **overrides})
 
     # one TaskGroup per layer; the groups run in sequence dim >> fact >> mart
     groups = []
@@ -101,5 +106,18 @@ with DAG(
             for table in tables:
                 spark_task(layer, table)
         groups.append(group)
+
+    # data quality of everything above; fails the run if an error-severity check fails
+    with TaskGroup(group_id="dq") as dq_group:
+        spark_task(
+            "dq", "dq_batch",
+            application=f"{DQ_DIR}/dq_batch.py",
+            py_files=",".join(
+                [f"{JOBS_DIR}/common.py", f"{DQ_DIR}/dq_framework.py", f"{DQ_DIR}/fact_rules.py"]
+            ),
+            # a retry re-runs every check; one is enough for a ClickHouse wake-up hiccup
+            retries=1,
+        )
+    groups.append(dq_group)
 
     chain(*groups)
