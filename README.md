@@ -36,7 +36,7 @@ scripts/           fact_views.sql (the views), generate_fact_views.py, streaming
 docker/            one folder per service (Dockerfile + compose file); streamgen/ = event generator
 docs/              how_to_add_a_table.md, streaming_design.md, streaming_test_runbook.md, architecture.drawio
 dataset/           the original CSVs (input of the bootstrap)
-webapp/            not started
+webapp/            Streamlit dashboard on the ClickHouse warehouse (see "Web app" below)
 ```
 
 ## Getting started
@@ -74,10 +74,28 @@ a ClickHouse Cloud service.
 | Spark master (workers, running apps, Structured Streaming tab) | http://localhost:8081 |
 | MinIO console (`MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD`) | http://localhost:9001 |
 | Superset | http://localhost:8088 |
+| Web app (once started, see "Web app") | http://localhost:8501 |
 | Kafka, from the host | `localhost:9094` |
 | ClickHouse Cloud, from DBeaver or another SQL client | `jdbc:clickhouse://<host>:8443/default?ssl=true&compress=0` |
 
 The `compress=0` in that URL is required for older JDBC drivers (0.5/0.6).
+
+## Web app
+
+`webapp/` is a Streamlit dashboard that reads the ClickHouse warehouse (database `dwh`) and
+serves one page per user group: Manager, Dispatch, Fleet & Safety, Finance & Planning, Sales,
+and Data Platform. Each page covers one or more business requirements (BR-01 to BR-08). It is
+not part of `docker-compose.yml`; run it on the host:
+
+```bash
+pip install -r webapp/requirements.txt
+export CH_HOST=<host> CH_USER=default CH_PASSWORD=<password> CH_DATABASE=dwh
+streamlit run webapp/app.py
+```
+
+Connection settings come from `st.secrets["clickhouse"]` (`.streamlit/secrets.toml`, or the
+Secrets box on Streamlit Cloud) or, if absent, from the `CH_*` variables above. `CH_HOST` is
+the bare hostname, without `https://`. Details: [webapp/README.md](webapp/README.md).
 
 ## More documentation
 
