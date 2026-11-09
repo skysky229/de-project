@@ -1,0 +1,6 @@
+streamlit>=1.50
+altair
+clickhouse-connect
+pandas
+numpy
+pyarrow<25
